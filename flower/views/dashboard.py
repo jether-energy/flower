@@ -44,7 +44,8 @@ class DashboardView(BaseHandler):
             worker = events.workers[name]
             info = dict(values)
             info.update(self._as_dict(worker))
-            info.update(status=worker.alive)
+            local_received = getattr(worker, 'local_received', None)
+            info.update(status=worker.alive, last_received=local_received)
             workers[name] = info
         
         if options.purge_offline_workers is not None:
@@ -56,6 +57,7 @@ class DashboardView(BaseHandler):
 
                 heartbeats = info.get('heartbeats', [])
                 last_heartbeat = int(max(heartbeats)) if heartbeats else None
+                last_heartbeat = last_heartbeat or info.get('last_received')
                 if not last_heartbeat or timestamp - last_heartbeat > options.purge_offline_workers:
                     offline_workers.append(name)
 
