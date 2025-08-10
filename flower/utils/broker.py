@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import sys
+import time
 import json
 import socket
 import logging
@@ -22,6 +23,13 @@ try:
     import redis
 except ImportError:
     redis = None
+
+try:
+    from google.cloud import pubsub_v1
+    from google.cloud import monitoring_v3
+except ImportError:
+    pubsub_v1 = None
+    monitoring_v3 = None
 
 
 logger = logging.getLogger(__name__)
@@ -235,6 +243,62 @@ class RedisSsl(Redis):
         return client_args
 
 
+class GCPubSub(BrokerBase):
+    """
+    Google Cloud Pub/Sub broker implementation.
+    """
+
+    def __init__(self, broker_url, *args, **kwargs):
+        super(GCPubSub, self).__init__(broker_url)
+        self.project_id = self.vhost
+        if not self.project_id:
+            raise ValueError("Project ID is required in broker URL: gcpubsub://projects/project-id")
+        if pubsub_v1 is None or monitoring_v3 is None:
+            raise ImportError('google-cloud-pubsub and monitoring library is required for GCP Pub/Sub broker')
+
+        self.broker_options = kwargs.get('broker_options', {})
+        self.queue_prefix = self.broker_options.get('queue_name_prefix', 'kombu-')
+        self.monitoring_client = monitoring_v3.MetricServiceClient()
+
+    def build_subscriptions_paths(self, names: list[str]) -> list[str]:
+        return [f"{self.host}/{self.project_id}/subscriptions/{self.queue_prefix}{name}" for name in names]
+
+    def get_subscriptions_pending_messages_count(self, subscriptions_paths: list[str]):
+
+        if not subscriptions_paths:
+            return {}
+
+        now = int(time.time())
+        interval = monitoring_v3.TimeInterval(end_time={'seconds': now}, start_time={'seconds': now - 60 * 5})
+        project_name = f"projects/{self.project_id}"
+        subs_map = {sub.split('/')[-1]: sub for sub in subscriptions_paths}
+        subs_filter = " OR ".join([f'resource.label.subscription_id="{sub}"' for sub in subs_map.keys()])
+        filter_str = (f'resource.type="pubsub_subscription" '
+                      f'AND resource.labels.project_id="{self.project_id}" '
+                      f'AND metric.type="pubsub.googleapis.com/subscription/num_undelivered_messages" '
+                      f'AND ({subs_filter})')
+        results = self.monitoring_client.list_time_series(
+            request={"name": project_name, "filter": filter_str, "interval": interval}
+        )
+        subscriptions_count = {
+            f'{ts.resource.labels["subscription_id"]}': ts.points[0].value.int64_value for ts in results
+        }
+        return subscriptions_count
+
+    @gen.coroutine
+    def queues(self, names):
+        subscriptions_paths = self.build_subscriptions_paths(names)
+        subscriptions_count = self.get_subscriptions_pending_messages_count(subscriptions_paths)
+        queue_stats = [
+            {
+                'name': sub.removeprefix(self.queue_prefix or ''),
+                'messages': num_messages,
+            }
+            for sub, num_messages in subscriptions_count.items()
+        ]
+
+        raise gen.Return(queue_stats)
+
 class Broker(object):
     def __new__(cls, broker_url, *args, **kwargs):
         scheme = urlparse(broker_url).scheme
@@ -248,6 +312,8 @@ class Broker(object):
             return RedisSocket(broker_url, *args, **kwargs)
         elif scheme == 'sentinel':
             return RedisSentinel(broker_url, *args, **kwargs)
+        elif scheme == 'gcpubsub':
+            return GCPubSub(broker_url, *args, **kwargs)
         else:
             raise NotImplementedError
 
