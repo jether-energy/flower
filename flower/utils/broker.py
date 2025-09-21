@@ -260,10 +260,10 @@ class GCPubSub(BrokerBase):
         self.queue_prefix = self.broker_options.get('queue_name_prefix', 'kombu-')
         self.monitoring_client = monitoring_v3.MetricServiceClient()
 
-    def build_subscriptions_paths(self, names: list[str]) -> list[str]:
+    def get_subscriptions_paths(self, names: list[str]) -> list[str]:
         return [f"{self.host}/{self.project_id}/subscriptions/{self.queue_prefix}{name}" for name in names]
 
-    def get_subscriptions_pending_messages_count(self, subscriptions_paths: list[str]):
+    def get_subscriptions_unacked_messages_count(self, subscriptions_paths: list[str]):
 
         if not subscriptions_paths:
             return {}
@@ -287,8 +287,8 @@ class GCPubSub(BrokerBase):
 
     @gen.coroutine
     def queues(self, names):
-        subscriptions_paths = self.build_subscriptions_paths(names)
-        subscriptions_count = self.get_subscriptions_pending_messages_count(subscriptions_paths)
+        subscriptions_paths = self.get_subscriptions_paths(names)
+        subscriptions_count = self.get_subscriptions_unacked_messages_count(subscriptions_paths)
         queue_stats = [
             {
                 'name': sub.removeprefix(self.queue_prefix or ''),
